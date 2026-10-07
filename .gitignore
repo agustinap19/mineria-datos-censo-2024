@@ -1,0 +1,22 @@
+# Entorno virtual
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# Datos pesados
+data/*.csv
+data/*.zip
+
+# Temporales
+*.tmp
+*.log
+.DS_Store
