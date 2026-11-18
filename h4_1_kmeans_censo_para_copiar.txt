@@ -1,0 +1,1705 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "eab4d89c",
+   "metadata": {},
+   "source": [
+    "# K-MEANS CLUSTERING: TIPOS DE MUNICIPIO SEGÚN SUS CARENCIAS DE SERVICIOS - CENSO 2024\n",
+    "\n",
+    "**Pregunta:** ¿qué tipos de municipio de Bolivia se pueden distinguir según **cuál** servicio básico les falta, y qué grupos conviene revisar primero?\n",
+    "\n",
+    "**Por qué este análisis complementa a los anteriores:** los clasificadores y la regresión estiman si una vivienda o un municipio tiene muchas carencias, pero no indican qué servicio falta. El IPS resume todo en un número: dos municipios pueden tener un IPS parecido con faltas distintas. K-Means no recibe ninguna respuesta correcta y busca esos perfiles en los datos.\n",
+    "\n",
+    "**Unidad de análisis:** el **municipio** (343), igual que en la regresión lineal. Hay dos razones para no agrupar viviendas: sus respuestas son categóricas, y K-Means usa promedios y distancias, que no tienen sentido sobre códigos; además, la silueta compara todos los pares de puntos, algo inviable con 2,6 millones de viviendas. El IPS y las tasas de carencia son **definiciones operativas del proyecto**, no indicadores oficiales del INE."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "888f705f",
+   "metadata": {},
+   "source": [
+    "# PARTE 1: MARCO TEÓRICO\n",
+    "\n",
+    "## Aprendizaje supervisado y no supervisado\n",
+    "\n",
+    "- **Supervisado:** aprende con datos etiquetados. La regresión logística y el árbol predicen `vivienda_precaria`, y la regresión lineal predice el IPS.\n",
+    "- **No supervisado:** busca patrones sin etiquetas. No hay una respuesta correcta con la cual comparar, por eso aquí **no hay división en entrenamiento y prueba** ni métricas como accuracy o R².\n",
+    "\n",
+    "## Clustering y K-Means\n",
+    "\n",
+    "El clustering divide los datos en grupos de modo que los elementos de un grupo se parezcan entre sí y se diferencien de los otros grupos. K-Means lo hace en cuatro pasos:\n",
+    "\n",
+    "1. **Inicialización:** elige K centroides iniciales (con K-Means++ en scikit-learn).\n",
+    "2. **Asignación:** cada punto se asigna al centroide más cercano, según la distancia euclidiana.\n",
+    "3. **Actualización:** cada centroide se recalcula como el promedio de los puntos de su grupo.\n",
+    "4. **Convergencia:** se repiten los pasos 2 y 3 hasta que los centroides casi no cambian.\n",
+    "\n",
+    "## Fundamento matemático\n",
+    "\n",
+    "**Distancia euclidiana** entre dos puntos $p$ y $q$ con $n$ variables:\n",
+    "\n",
+    "$$d(p, q) = \\sqrt{\\sum_{i=1}^{n}(p_i - q_i)^2}$$\n",
+    "\n",
+    "**Función objetivo (WCSS):** K-Means minimiza la suma de cuadrados dentro de los clusters, donde $C_k$ es el grupo $k$ y $\\mu_k$ su centroide:\n",
+    "\n",
+    "$$WCSS = \\sum_{k=1}^{K} \\sum_{x_i \\in C_k} \\|x_i - \\mu_k\\|^2$$\n",
+    "\n",
+    "Un WCSS menor indica grupos más compactos, pero siempre baja al aumentar K. Por eso no sirve por sí solo para elegir K.\n",
+    "\n",
+    "## Ventajas y desventajas\n",
+    "\n",
+    "| Ventajas | Desventajas |\n",
+    "|---|---|\n",
+    "| Simple y fácil de interpretar | Hay que definir K de antemano |\n",
+    "| Rápido y escalable | Sensible a valores extremos y a la escala |\n",
+    "| Ampliamente disponible | Tiende a formar grupos compactos y de forma esférica |\n",
+    "| | Siempre devuelve K grupos, aunque los datos no tengan grupos claros |"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "ed2e218d",
+   "metadata": {},
+   "source": [
+    "# PARTE 2: IMPLEMENTACIÓN EN PYTHON\n",
+    "\n",
+    "## Paso 0: Librerías"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "7f8ce1a3",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:26:42.470160Z",
+     "iopub.status.busy": "2026-11-04T21:26:42.469771Z",
+     "iopub.status.idle": "2026-11-04T21:26:49.227096Z",
+     "shell.execute_reply": "2026-11-04T21:26:49.225286Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "import os\n",
+    "os.environ.setdefault(\"OMP_NUM_THREADS\", \"2\")  # evita la fuga de memoria de KMeans en Windows; va antes de sklearn\n",
+    "\n",
+    "from pathlib import Path\n",
+    "import gc\n",
+    "import numpy as np\n",
+    "import pandas as pd\n",
+    "import matplotlib.pyplot as plt\n",
+    "import seaborn as sns\n",
+    "from IPython.display import display, Markdown\n",
+    "\n",
+    "# modelo y métricas\n",
+    "from sklearn.cluster import KMeans\n",
+    "from sklearn.decomposition import PCA\n",
+    "from sklearn.preprocessing import StandardScaler\n",
+    "from sklearn.metrics import silhouette_score, silhouette_samples, davies_bouldin_score, adjusted_rand_score\n",
+    "\n",
+    "sns.set_theme(style=\"whitegrid\")\n",
+    "plt.rcParams.update({\"font.size\":10, \"axes.titlesize\":13, \"figure.dpi\":115})\n",
+    "COLOR = \"#237b86\"       # mismo tono de los notebooks anteriores del proyecto\n",
+    "REFERENCIA = \"#d1843d\"  # resaltado o referencia\n",
+    "# un color y una forma fijos por grupo, para no depender solo del color\n",
+    "COLORES = {1:\"#2a78d6\", 2:\"#eb6834\", 3:\"#1baf7a\", 4:\"#eda100\"}\n",
+    "MARCAS = {1:\"o\", 2:\"s\", 3:\"^\", 4:\"D\"}\n",
+    "FUENTE = \"Fuente: elaboración propia con microdatos del Censo 2024, INE Bolivia.\""
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "9e607df0",
+   "metadata": {},
+   "source": [
+    "## Parametrización"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "738314fb",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:26:49.232461Z",
+     "iopub.status.busy": "2026-11-04T21:26:49.231854Z",
+     "iopub.status.idle": "2026-11-04T21:26:49.243575Z",
+     "shell.execute_reply": "2026-11-04T21:26:49.242015Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# rutas: se busca el CSV en data/ y, si no está, en la carpeta local donde se guardó\n",
+    "DATA = Path(\"data\")\n",
+    "CSV = DATA / \"Vivienda_CPV-2024.csv\"\n",
+    "if not CSV.is_file():\n",
+    "    CSV = Path.home() / \"Desktop\" / \"Base de datos CSV\" / \"Vivienda_CPV-2024.csv\"\n",
+    "assert CSV.is_file(), \"Copiar Vivienda_CPV-2024.csv a la carpeta data/.\"\n",
+    "\n",
+    "RANDOM_STATE = 42    # misma semilla de los modelos anteriores del proyecto\n",
+    "N_INIT = 20          # inicios distintos por ajuste; se conserva el de menor WCSS\n",
+    "K_CANDIDATOS = [3, 4, 5, 6]  # K=2 solo separa \"más\" y \"menos\" carencias; se revisa aparte en la pregunta 5\n",
+    "TOLERANCIA_SILUETA = 0.02    # diferencia de silueta que se considera un empate\n",
+    "\n",
+    "DEPARTAMENTOS = {\"01\":\"Chuquisaca\", \"02\":\"La Paz\", \"03\":\"Cochabamba\", \"04\":\"Oruro\", \"05\":\"Potosí\",\n",
+    "                 \"06\":\"Tarija\", \"07\":\"Santa Cruz\", \"08\":\"Beni\", \"09\":\"Pando\"}\n",
+    "\n",
+    "territorio = [\"idep\", \"iprov\", \"imun\"]\n",
+    "filtros = [\"v01_tipoviv\", \"v02_condocup\", \"tot_pers\"]\n",
+    "fuentes_objetivo = [\"v07_aguapro\", \"v15_servsan\", \"v16_desague\", \"v09_energia\", \"v19e_f\"]\n",
+    "caracteristicas = [\"urbrur\", \"v03_pared\", \"v05_techo\", \"v06_piso\", \"v11_basura\", \"v14_dormit\", \"v17_tenencia\"]\n",
+    "# variables nuevas para cruzar con los grupos (recomendación del docente): describen, no forman los grupos\n",
+    "hogar = [\"v13_habitac\", \"v10_combus\", \"v12_cocina\", \"v18f_refri\", \"v19c_compu\", \"v19d_celular\", \"v20a_emi\", \"tip_hog\"]\n",
+    "LIMITE_HACINAMIENTO = 3  # más de 3 personas por dormitorio = hacinamiento (definición operativa del proyecto)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "ba42d9f7",
+   "metadata": {},
+   "source": [
+    "## Paso 1: Carga y primera inspección\n",
+    "\n",
+    "Se reproducen la población analítica y las reglas de carencia de `entendimiento de datos.ipynb`. Los controles con `assert` comprueban que las cifras coinciden con los notebooks anteriores."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "2d7d7427",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:26:49.248114Z",
+     "iopub.status.busy": "2026-11-04T21:26:49.247379Z",
+     "iopub.status.idle": "2026-11-04T21:27:08.645166Z",
+     "shell.execute_reply": "2026-11-04T21:27:08.644208Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# cargamos solo las columnas necesarias; todas como texto categórico para ahorrar memoria\n",
+    "columnas_lectura = list(dict.fromkeys(territorio + filtros + fuentes_objetivo + caracteristicas + hogar))\n",
+    "censo = pd.read_csv(CSV, sep=\";\", encoding=\"utf-8-sig\", usecols=columnas_lectura,\n",
+    "                    dtype={c:\"category\" for c in columnas_lectura})\n",
+    "assert len(censo) == 4_490_488, \"El número de filas originales cambió.\"\n",
+    "\n",
+    "# misma población analítica de los notebooks anteriores\n",
+    "particular = censo[\"v01_tipoviv\"].astype(\"string\").isin({\"1\",\"2\",\"3\",\"4\",\"5\",\"6\"})\n",
+    "presente = censo[\"v02_condocup\"].astype(\"string\").isin({\"0\",\"1\"})\n",
+    "con_personas = pd.to_numeric(censo[\"tot_pers\"].astype(\"string\"), errors=\"coerce\").gt(0)\n",
+    "aplica = censo[[\"v07_aguapro\",\"v15_servsan\",\"v09_energia\",\"v19e_f\"]].notna().all(axis=1)\n",
+    "viviendas = censo.loc[particular & presente & con_personas & aplica].copy()\n",
+    "assert len(viviendas) == 3_623_711, \"La población analítica no coincide con el análisis previo.\"\n",
+    "print(\"CSV original:\", censo.shape)\n",
+    "print(\"Viviendas analíticas:\", viviendas.shape)\n",
+    "\n",
+    "del censo, particular, presente, con_personas, aplica\n",
+    "_ = gc.collect()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "e161e8e5",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:08.649148Z",
+     "iopub.status.busy": "2026-11-04T21:27:08.648809Z",
+     "iopub.status.idle": "2026-11-04T21:27:15.718680Z",
+     "shell.execute_reply": "2026-11-04T21:27:15.717514Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# reglas de carencia documentadas en entendimiento de datos.ipynb\n",
+    "def indicador(index, reglas):\n",
+    "    resultado = pd.Series(pd.NA, index=index, dtype=\"Int8\")\n",
+    "    for condicion, valor in reglas:\n",
+    "        resultado.loc[condicion.fillna(False)] = valor\n",
+    "    return resultado\n",
+    "\n",
+    "agua = viviendas[\"v07_aguapro\"].astype(\"string\")\n",
+    "san = viviendas[\"v15_servsan\"].astype(\"string\")\n",
+    "des = viviendas[\"v16_desague\"].astype(\"string\")\n",
+    "elec = viviendas[\"v09_energia\"].astype(\"string\")\n",
+    "inet = viviendas[\"v19e_f\"].astype(\"string\")\n",
+    "carencias = pd.DataFrame({\n",
+    "    \"agua\": indicador(viviendas.index, [(agua.isin({\"1\",\"2\",\"4\",\"6\"}),0), (agua.isin({\"5\",\"7\"}),1)]),\n",
+    "    \"saneamiento\": indicador(viviendas.index, [((san==\"1\") & des.isin({\"1\",\"2\",\"6\"}),0),\n",
+    "                                               (san.isin({\"2\",\"3\"}) | ((san==\"1\") & (des==\"5\")),1)]),\n",
+    "    \"electricidad\": indicador(viviendas.index, [(elec.isin({\"1\",\"2\",\"3\",\"4\"}),0), (elec==\"5\",1)]),\n",
+    "    \"internet\": indicador(viviendas.index, [(inet==\"1\",0), (inet==\"2\",1)]),\n",
+    "})\n",
+    "completas = carencias.notna().all(axis=1)\n",
+    "\n",
+    "# código único del municipio: departamento + provincia + municipio\n",
+    "viviendas[\"municipio\"] = (viviendas[\"idep\"].astype(\"string\") + viviendas[\"iprov\"].astype(\"string\")\n",
+    "                          + viviendas[\"imun\"].astype(\"string\"))\n",
+    "analiticas_por_municipio = viviendas.groupby(\"municipio\").size()\n",
+    "\n",
+    "clasificables = viviendas.loc[completas].copy()\n",
+    "carencias = carencias.loc[completas]\n",
+    "n_carencias = carencias.sum(axis=1).to_numpy(dtype=float)\n",
+    "assert len(clasificables) == 2_635_157, \"La población con objetivo cambió.\"\n",
+    "ips_nacional = 100 * (n_carencias >= 2).mean()\n",
+    "assert round(ips_nacional, 2) == 19.60, \"El IPS no coincide con el notebook de entendimiento.\"\n",
+    "print(\"Viviendas clasificables:\", len(clasificables), \"| IPS nacional:\", round(ips_nacional, 2), \"%\")\n",
+    "\n",
+    "del viviendas, completas, agua, san, des, elec, inet\n",
+    "_ = gc.collect()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "e34083b7",
+   "metadata": {},
+   "source": [
+    "## Paso 2: Ingeniería de variables\n",
+    "\n",
+    "Cada vivienda clasificable se resume en su municipio. Las respuestas que no permiten clasificar alguna carencia quedan fuera y no se convierten de forma arbitraria en acceso o falta de acceso."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "2b363ca0",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:15.722838Z",
+     "iopub.status.busy": "2026-11-04T21:27:15.722191Z",
+     "iopub.status.idle": "2026-11-04T21:27:20.985474Z",
+     "shell.execute_reply": "2026-11-04T21:27:20.984606Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# de vivienda a municipio: cada fila nueva resume las viviendas clasificables de un municipio\n",
+    "grupo = clasificables[\"municipio\"].astype(\"string\").to_numpy()\n",
+    "\n",
+    "def promedio(valores):\n",
+    "    # promedio por municipio de un arreglo con un valor por vivienda\n",
+    "    return pd.Series(np.asarray(valores, dtype=float)).groupby(grupo).mean()\n",
+    "\n",
+    "def porcentaje(columna, codigos):\n",
+    "    # porcentaje de viviendas del municipio cuya respuesta está en los códigos indicados\n",
+    "    return 100 * promedio(clasificables[columna].astype(\"string\").isin(codigos))\n",
+    "\n",
+    "df = pd.DataFrame({\n",
+    "    # variables de agrupamiento: tasa de carencia en cada servicio\n",
+    "    \"pct_sin_agua\": 100 * promedio(carencias[\"agua\"].to_numpy(dtype=float)),\n",
+    "    \"pct_sin_saneamiento\": 100 * promedio(carencias[\"saneamiento\"].to_numpy(dtype=float)),\n",
+    "    \"pct_sin_electricidad\": 100 * promedio(carencias[\"electricidad\"].to_numpy(dtype=float)),\n",
+    "    \"pct_sin_internet\": 100 * promedio(carencias[\"internet\"].to_numpy(dtype=float)),\n",
+    "    # variables de contexto: describen los grupos, no los forman\n",
+    "    \"ips\": 100 * promedio(n_carencias >= 2),\n",
+    "    \"n_viviendas\": pd.Series(grupo).groupby(grupo).size(),\n",
+    "    \"pct_rural\": porcentaje(\"urbrur\", {\"2\"}),\n",
+    "    \"pct_piso_tierra\": porcentaje(\"v06_piso\", {\"1\"}),\n",
+    "    \"pct_pared_no_ladrillo\": porcentaje(\"v03_pared\", {\"2\",\"3\",\"4\",\"5\",\"6\",\"7\"}),\n",
+    "    \"pct_techo_paja\": porcentaje(\"v05_techo\", {\"4\"}),\n",
+    "    \"pct_basura_sin_servicio\": porcentaje(\"v11_basura\", {\"3\",\"4\",\"5\",\"6\",\"7\"}),\n",
+    "    \"pct_hasta_un_dormitorio\": porcentaje(\"v14_dormit\", {\"0\",\"1\"}),\n",
+    "    \"pct_alquiler_anticretico\": porcentaje(\"v17_tenencia\", {\"4\",\"5\",\"6\"}),\n",
+    "})\n",
+    "# --- variables nuevas: personas y hogar (solo describen los grupos) ---\n",
+    "def numero(columna):\n",
+    "    return pd.to_numeric(clasificables[columna].astype(\"string\"), errors=\"coerce\")\n",
+    "\n",
+    "def porcentaje_valido(columna, codigos, validos):\n",
+    "    # como porcentaje(), pero \"sin especificar\" (9) queda fuera del denominador en vez de contar como \"no\"\n",
+    "    respuesta = clasificables[columna].astype(\"string\")\n",
+    "    valores = respuesta.isin(codigos).astype(float).where(respuesta.isin(validos))\n",
+    "    return 100 * promedio(valores)\n",
+    "\n",
+    "personas = numero(\"tot_pers\").to_numpy(dtype=float)\n",
+    "dormit, habitac = numero(\"v14_dormit\"), numero(\"v13_habitac\")\n",
+    "# si no hay un cuarto solo para dormir, se duerme en los cuartos que ocupan; sin dato queda vacío\n",
+    "dormitorios = dormit.mask(dormit == 0, habitac).to_numpy(dtype=float)\n",
+    "pers_dorm = personas / dormitorios\n",
+    "hacinada = np.where(np.isnan(pers_dorm), np.nan, (pers_dorm > LIMITE_HACINAMIENTO).astype(float))\n",
+    "\n",
+    "df[\"n_personas\"] = pd.Series(personas).groupby(grupo).sum()\n",
+    "df[\"personas_precarias\"] = pd.Series(np.where(n_carencias >= 2, personas, 0)).groupby(grupo).sum()\n",
+    "df[\"personas_por_vivienda\"] = promedio(personas)\n",
+    "df[\"personas_por_dormitorio\"] = promedio(pers_dorm)\n",
+    "df[\"pct_hacinamiento\"] = 100 * promedio(hacinada)\n",
+    "df[\"pct_lena\"] = porcentaje_valido(\"v10_combus\", {\"3\",\"4\"}, {str(i) for i in range(1, 9)})\n",
+    "df[\"pct_sin_cocina\"] = porcentaje_valido(\"v12_cocina\", {\"2\"}, {\"1\",\"2\"})\n",
+    "df[\"pct_sin_refri\"] = porcentaje_valido(\"v18f_refri\", {\"2\"}, {\"1\",\"2\"})\n",
+    "df[\"pct_sin_computadora\"] = porcentaje_valido(\"v19c_compu\", {\"2\"}, {\"1\",\"2\"})\n",
+    "df[\"pct_sin_celular\"] = porcentaje_valido(\"v19d_celular\", {\"2\"}, {\"1\",\"2\"})\n",
+    "df[\"pct_emigracion\"] = porcentaje_valido(\"v20a_emi\", {\"1\"}, {\"1\",\"2\"})\n",
+    "df[\"pct_hogar_extendido\"] = porcentaje_valido(\"tip_hog\", {\"5\",\"6\"}, {str(i) for i in range(1, 9)})\n",
+    "assert df[\"n_personas\"].sum() == np.nansum(personas)\n",
+    "\n",
+    "df[\"cobertura\"] = 100 * df[\"n_viviendas\"] / analiticas_por_municipio\n",
+    "df[\"departamento\"] = df.index.str[:2].map(DEPARTAMENTOS)\n",
+    "df.index.name = \"municipio\"\n",
+    "df = df.sort_index()\n",
+    "\n",
+    "features = [\"pct_sin_agua\", \"pct_sin_saneamiento\", \"pct_sin_electricidad\", \"pct_sin_internet\"]\n",
+    "contexto = [\"pct_rural\", \"pct_piso_tierra\", \"pct_pared_no_ladrillo\", \"pct_techo_paja\",\n",
+    "            \"pct_basura_sin_servicio\", \"pct_hasta_un_dormitorio\", \"pct_alquiler_anticretico\"]\n",
+    "\n",
+    "assert len(df) == 343 and df[features + contexto + [\"ips\", \"n_personas\"]].notna().all().all()\n",
+    "print(\"Municipios con algún dato de hogar vacío:\", int(df.isna().any(axis=1).sum()))\n",
+    "assert df[\"n_viviendas\"].sum() == len(clasificables)\n",
+    "del clasificables, carencias, n_carencias, grupo\n",
+    "_ = gc.collect()\n",
+    "\n",
+    "print(df.shape)\n",
+    "df.head(3)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "feb11b90",
+   "metadata": {},
+   "source": [
+    "**Detalle de las variables** (una fila por municipio; códigos según la hoja `VIVIENDA` del diccionario oficial)\n",
+    "\n",
+    "| Variable | Definición | Uso |\n",
+    "|---|---|---|\n",
+    "| `pct_sin_agua` | % con carencia de agua (`v07_aguapro` = 5 o 7) | **Forma los grupos** |\n",
+    "| `pct_sin_saneamiento` | % sin baño propio o con desagüe a la superficie (`v15_servsan`, `v16_desague`) | **Forma los grupos** |\n",
+    "| `pct_sin_electricidad` | % sin energía eléctrica (`v09_energia` = 5) | **Forma los grupos** |\n",
+    "| `pct_sin_internet` | % sin internet (`v19e_f` = 2) | **Forma los grupos** |\n",
+    "| `ips` | % con dos o más carencias | Describe |\n",
+    "| `pct_rural`, `pct_piso_tierra`, `pct_pared_no_ladrillo`, `pct_techo_paja`, `pct_basura_sin_servicio`, `pct_hasta_un_dormitorio`, `pct_alquiler_anticretico` | Características de las viviendas, definidas igual que en la regresión lineal | Describe |\n",
+    "| `n_viviendas`, `cobertura`, `departamento` | Tamaño, % de viviendas con clase determinada y territorio | Describe |\n",
+    "\n",
+    "**Por qué solo cuatro variables forman los grupos:** responden directamente a qué servicio falta. El IPS no se incluye porque se calcula con esas mismas carencias y las contaría dos veces. Las características de la vivienda se dejan aparte para describir los grupos después, y en el Paso 6 se comprueba qué ocurre al usarlas."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "f37b18ec",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:20.988341Z",
+     "iopub.status.busy": "2026-11-04T21:27:20.988040Z",
+     "iopub.status.idle": "2026-11-04T21:27:21.006464Z",
+     "shell.execute_reply": "2026-11-04T21:27:21.005517Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# información general del DataFrame\n",
+    "df.info()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "f57d0259",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:21.011247Z",
+     "iopub.status.busy": "2026-11-04T21:27:21.010922Z",
+     "iopub.status.idle": "2026-11-04T21:27:21.070982Z",
+     "shell.execute_reply": "2026-11-04T21:27:21.070052Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# estadísticas descriptivas\n",
+    "df[features + [\"ips\"] + contexto + [\"n_viviendas\", \"cobertura\"]].describe().T.round(2)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "5ef13ecd",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:21.073924Z",
+     "iopub.status.busy": "2026-11-04T21:27:21.073618Z",
+     "iopub.status.idle": "2026-11-04T21:27:21.078801Z",
+     "shell.execute_reply": "2026-11-04T21:27:21.077902Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# valores nulos\n",
+    "print(\"Municipios con algún valor nulo:\", int(df.isna().any(axis=1).sum()))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "6b3ce591",
+   "metadata": {},
+   "source": [
+    "## Paso 3: Visualización exploratoria"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "7f2b4047",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:21.082115Z",
+     "iopub.status.busy": "2026-11-04T21:27:21.081800Z",
+     "iopub.status.idle": "2026-11-04T21:27:22.225402Z",
+     "shell.execute_reply": "2026-11-04T21:27:22.223922Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# histogramas de las cuatro variables de agrupamiento, en la misma escala\n",
+    "nombres = {\"pct_sin_agua\":\"Sin agua\", \"pct_sin_saneamiento\":\"Sin saneamiento\",\n",
+    "           \"pct_sin_electricidad\":\"Sin electricidad\", \"pct_sin_internet\":\"Sin internet\"}\n",
+    "fig, axes = plt.subplots(1, 4, figsize=(14, 3.6), sharex=True, sharey=True)\n",
+    "for ax, columna in zip(axes, features):\n",
+    "    ax.hist(df[columna], bins=np.arange(0, 105, 5), color=COLOR, edgecolor=\"white\")\n",
+    "    ax.set(title=nombres[columna], xlabel=\"% de viviendas del municipio\")\n",
+    "    ax.spines[[\"top\", \"right\"]].set_visible(False)\n",
+    "    ax.grid(False, axis=\"x\")\n",
+    "axes[0].set_ylabel(\"Municipios\")\n",
+    "fig.text(0.01, 0.01, FUENTE, fontsize=8)\n",
+    "fig.tight_layout(rect=(0, 0.06, 1, 1))\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "d0bd96ec",
+   "metadata": {},
+   "source": [
+    "**Lectura:** las cuatro tasas tienen niveles muy distintos. La falta de saneamiento es la más alta (promedio de 63,5 %) y las de agua y electricidad, las más bajas (19,1 % y 20,3 %). Ningún histograma muestra jorobas separadas, primera señal de que no hay grupos muy marcados."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "7c28b09f",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:22.228981Z",
+     "iopub.status.busy": "2026-11-04T21:27:22.228683Z",
+     "iopub.status.idle": "2026-11-04T21:27:22.555134Z",
+     "shell.execute_reply": "2026-11-04T21:27:22.553781Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# ¿se ven grupos naturales antes de aplicar el modelo?\n",
+    "fig, ax = plt.subplots(figsize=(7.5, 5.5))\n",
+    "ax.scatter(df[\"pct_sin_saneamiento\"], df[\"pct_sin_agua\"], s=26, alpha=0.65, color=COLOR, edgecolor=\"white\", linewidth=0.4)\n",
+    "ax.set(title=\"Carencia de saneamiento y de agua por municipio\",\n",
+    "       xlabel=\"% de viviendas sin saneamiento\", ylabel=\"% de viviendas sin agua\")\n",
+    "ax.spines[[\"top\", \"right\"]].set_visible(False)\n",
+    "fig.text(0.01, 0.01, FUENTE + \" Cada punto es un municipio.\", fontsize=8)\n",
+    "fig.tight_layout(rect=(0, 0.04, 1, 1))\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "5109aa12",
+   "metadata": {},
+   "source": [
+    "**Lectura:** los municipios forman una nube continua, sin bloques separados. Al subir la falta de saneamiento, la falta de agua también tiende a subir, y además se abre: a partir de cerca de 50 % de saneamiento hay municipios con muy poca y con mucha falta de agua. Esa diferencia es la que puede dar perfiles distintos."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "9164002e",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:22.560541Z",
+     "iopub.status.busy": "2026-11-04T21:27:22.559679Z",
+     "iopub.status.idle": "2026-11-04T21:27:23.117143Z",
+     "shell.execute_reply": "2026-11-04T21:27:23.115578Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# mapa de correlaciones: una sola escala divergente con 0 como punto medio\n",
+    "fig, ax = plt.subplots(figsize=(6.5, 5))\n",
+    "sns.heatmap(df[features + [\"ips\"]].corr(), annot=True, fmt=\".2f\", cmap=\"vlag\", vmin=-1, vmax=1, square=True,\n",
+    "            linewidths=0.5, cbar_kws={\"shrink\":0.8, \"label\":\"Correlación\"}, ax=ax)\n",
+    "ax.set_title(\"Correlación entre las tasas de carencia y el IPS\")\n",
+    "fig.text(0.01, 0.01, FUENTE, fontsize=8)\n",
+    "fig.tight_layout(rect=(0, 0.04, 1, 1))\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "54d33c8b",
+   "metadata": {},
+   "source": [
+    "**Lectura:** las carencias se mueven juntas (correlaciones de 0,56 a 0,77), pero no son idénticas. La falta de agua es la menos ligada a saneamiento e internet (0,56 y 0,57). El IPS se correlaciona de 0,78 a 0,90 con cada una porque se construye con ellas, otra razón para no usarlo como variable de agrupamiento."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "2089412a",
+   "metadata": {},
+   "source": [
+    "# ACTIVIDAD PARTICIPATIVA 1: Reflexión conceptual\n",
+    "\n",
+    "**1. Si tuvieras que agrupar 343 municipios a mano, ¿qué criterios usarías?**\n",
+    "\n",
+    "Revisaría qué servicio falta en cada uno y separaría a los que tienen pocas carencias de los que tienen muchas. Luego distinguiría, entre estos últimos, los que además carecen de lo más básico: agua y electricidad. Hacerlo a mano con cuatro variables a la vez es lento y subjetivo; K-Means aplica un mismo criterio de distancia a todos.\n",
+    "\n",
+    "**2. Mirando las variables, ¿cuántos grupos crees que existen? ¿Por qué?**\n",
+    "\n",
+    "Según la exploración, no se esperan grupos naturales muy separados, porque las carencias suben casi juntas. Es razonable esperar pocos grupos, entre tres y cinco, que dividan ese recorrido, con alguna diferencia dada por el agua.\n",
+    "\n",
+    "**3. ¿Qué columnas son más útiles para agrupar? ¿Por qué esas y no otras?**\n",
+    "\n",
+    "Las cuatro tasas de carencia, porque responden a la pregunta del proyecto y están en la misma unidad. No se usan los códigos de departamento o municipio, porque son etiquetas sin distancia real, ni el IPS, porque repetiría la información.\n",
+    "\n",
+    "**4. ¿Por qué es importante conocer los distintos tipos de municipio?**\n",
+    "\n",
+    "Porque cada falta de servicio pide una respuesta distinta: llevar agua y electricidad no se organiza igual que ampliar saneamiento o internet. Un solo índice no permite ver esa diferencia."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "69f949f4",
+   "metadata": {},
+   "source": [
+    "# PARTE 3: PREPROCESAMIENTO\n",
+    "\n",
+    "K-Means usa distancias, por lo que una variable con mayor dispersión pesaría más. Aquí todas están en porcentaje, pero su desviación estándar va de 13,97 (electricidad) a 20,75 (saneamiento). **StandardScaler** deja cada variable con media 0 y desviación estándar 1:\n",
+    "\n",
+    "$$z = \\frac{x - \\mu}{\\sigma}$$\n",
+    "\n",
+    "Así, las cuatro carencias pesan lo mismo en la distancia. Es una decisión de método, y en el Paso 6 se revisa cuánto cambia el resultado sin ella. No hay faltantes que imputar."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "bb59f339",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:23.120587Z",
+     "iopub.status.busy": "2026-11-04T21:27:23.120296Z",
+     "iopub.status.idle": "2026-11-04T21:27:23.205934Z",
+     "shell.execute_reply": "2026-11-04T21:27:23.204993Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# Aplicar StandardScaler: media 0 y desviación estándar 1 en cada variable\n",
+    "X = df[features].copy()\n",
+    "scaler = StandardScaler()\n",
+    "X_scaled = scaler.fit_transform(X)\n",
+    "X_scaled_df = pd.DataFrame(X_scaled, columns=features, index=X.index)\n",
+    "\n",
+    "print(\"ANTES (valores originales):\")\n",
+    "print(X.agg([\"mean\", \"std\"]).round(2).to_string())\n",
+    "print(\"\\nDESPUÉS (valores escalados):\")\n",
+    "print(X_scaled_df.agg([\"mean\", \"std\"]).round(2).to_string())"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "a49c3c9b",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:23.209187Z",
+     "iopub.status.busy": "2026-11-04T21:27:23.208885Z",
+     "iopub.status.idle": "2026-11-04T21:27:23.901124Z",
+     "shell.execute_reply": "2026-11-04T21:27:23.899896Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# efecto del escalado\n",
+    "fig, axes = plt.subplots(1, 2, figsize=(12, 4.4))\n",
+    "sns.boxplot(data=X.rename(columns=nombres), color=\"#9cc7cb\", linewidth=1, ax=axes[0])\n",
+    "axes[0].set(title=\"Antes del escalado\", ylabel=\"% de viviendas\")\n",
+    "sns.boxplot(data=X_scaled_df.rename(columns=nombres), color=\"#9cc7cb\", linewidth=1, ax=axes[1])\n",
+    "axes[1].set(title=\"Después del escalado (StandardScaler)\", ylabel=\"Valor escalado (z)\")\n",
+    "for ax in axes:\n",
+    "    ax.spines[[\"top\", \"right\"]].set_visible(False)\n",
+    "    ax.grid(False, axis=\"x\")\n",
+    "fig.text(0.01, 0.01, FUENTE, fontsize=8)\n",
+    "fig.tight_layout(rect=(0, 0.05, 1, 1))\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "ef1cc615",
+   "metadata": {},
+   "source": [
+    "# PARTE 4: IMPLEMENTACIÓN DE K-MEANS\n",
+    "\n",
+    "## ¿Cómo elegir K?\n",
+    "\n",
+    "- **Método del codo:** el K a partir del cual agregar grupos ya casi no reduce el WCSS.\n",
+    "- **Silueta:** compara cuán cerca está cada punto de su grupo frente al grupo vecino. Va de -1 a 1; más alto es mejor.\n",
+    "- **Davies-Bouldin:** promedia cuánto se parece cada grupo a su grupo más similar; más bajo es mejor.\n",
+    "- **Estabilidad (ARI):** repite el ajuste con inicios distintos y mide si sale la misma partición.\n",
+    "\n",
+    "**Regla fijada:** K=2 solo separaría \"más\" de \"menos\" carencias, sin indicar qué servicio falta, por lo que se revisa aparte en la pregunta 5. Entre K=3 y K=6 se consideran empatados los valores a menos de 0,02 de la mejor silueta, y entre ellos gana el más estable."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "82d71d4f",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:23.906428Z",
+     "iopub.status.busy": "2026-11-04T21:27:23.905936Z",
+     "iopub.status.idle": "2026-11-04T21:27:25.353182Z",
+     "shell.execute_reply": "2026-11-04T21:27:25.352301Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# para cada K: compactación, separación y estabilidad frente al inicio aleatorio\n",
+    "k_range = range(2, 11)\n",
+    "filas = []\n",
+    "for k in k_range:\n",
+    "    modelo = KMeans(n_clusters=k, random_state=RANDOM_STATE, n_init=N_INIT).fit(X_scaled)\n",
+    "    # ARI: 1 = misma partición, 0 = coincidencia como la del azar\n",
+    "    acuerdos = [adjusted_rand_score(modelo.labels_, KMeans(n_clusters=k, random_state=s, n_init=1).fit_predict(X_scaled))\n",
+    "                for s in range(20)]\n",
+    "    filas.append({\"K\":k, \"WCSS\":modelo.inertia_, \"Silueta\":silhouette_score(X_scaled, modelo.labels_),\n",
+    "                  \"Davies-Bouldin\":davies_bouldin_score(X_scaled, modelo.labels_),\n",
+    "                  \"Estabilidad (ARI)\":np.mean(acuerdos), \"Grupo más pequeño\":np.bincount(modelo.labels_).min()})\n",
+    "tabla_k = pd.DataFrame(filas).set_index(\"K\")\n",
+    "tabla_k.insert(1, \"Reducción de WCSS (%)\", -100 * tabla_k[\"WCSS\"].pct_change())\n",
+    "display(tabla_k.round(3))\n",
+    "\n",
+    "# regla: entre los candidatos, los de silueta casi igual a la mejor; gana el más estable\n",
+    "candidatos = tabla_k.loc[K_CANDIDATOS]\n",
+    "empatados = candidatos[candidatos[\"Silueta\"] >= candidatos[\"Silueta\"].max() - TOLERANCIA_SILUETA]\n",
+    "K_OPTIMO = int(empatados[\"Estabilidad (ARI)\"].idxmax())\n",
+    "print(\"K con silueta empatada:\", list(empatados.index), \"| K seleccionado:\", K_OPTIMO)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "019fa0e6",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:25.356414Z",
+     "iopub.status.busy": "2026-11-04T21:27:25.356100Z",
+     "iopub.status.idle": "2026-11-04T21:27:26.026808Z",
+     "shell.execute_reply": "2026-11-04T21:27:26.025911Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# método del codo y silueta: dos gráficos, cada uno con su propia escala\n",
+    "fig, axes = plt.subplots(1, 2, figsize=(12, 4.6))\n",
+    "axes[0].plot(tabla_k.index, tabla_k[\"WCSS\"], marker=\"o\", markersize=8, linewidth=2, color=COLOR)\n",
+    "axes[0].scatter([K_OPTIMO], [tabla_k.loc[K_OPTIMO, \"WCSS\"]], s=130, color=REFERENCIA, zorder=3)\n",
+    "axes[0].annotate(f\"K = {K_OPTIMO}\", (K_OPTIMO, tabla_k.loc[K_OPTIMO, \"WCSS\"]), xytext=(10, 10), textcoords=\"offset points\")\n",
+    "axes[0].set(title=\"Método del codo\", xlabel=\"Número de clusters (K)\", ylabel=\"WCSS\", xticks=list(k_range), ylim=(0, None))\n",
+    "\n",
+    "barras = axes[1].bar(tabla_k.index, tabla_k[\"Silueta\"], color=[REFERENCIA if k == K_OPTIMO else COLOR for k in tabla_k.index], edgecolor=\"white\")\n",
+    "axes[1].bar_label(barras, fmt=\"%.3f\", fontsize=8, padding=2)\n",
+    "axes[1].set(title=\"Silueta\", xlabel=\"Número de clusters (K)\", ylabel=\"Silueta promedio\", xticks=list(k_range))\n",
+    "for ax in axes:\n",
+    "    ax.spines[[\"top\", \"right\"]].set_visible(False)\n",
+    "    ax.grid(False, axis=\"x\")\n",
+    "fig.text(0.01, 0.01, FUENTE, fontsize=8)\n",
+    "fig.tight_layout(rect=(0, 0.05, 1, 1))\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "8b6a0375",
+   "metadata": {},
+   "source": [
+    "**Interpretación:** K=2 tiene la mayor silueta (0,434), como en el ejemplo de iFood, pero no responde a la pregunta. Entre los candidatos empatan K=3, 4 y 5 (0,324; 0,313 y 0,320), y la regla elige **K=4**, el más estable (ARI de 0,857). El codo apoya la elección: el WCSS baja 25,3 % y 21,3 % al pasar a K=3 y K=4, y luego solo 13,7 %. La ventaja frente a K=3 es pequeña (0,857 frente a 0,844), así que **K=4 es una elección razonable, no un número natural de los datos**."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "e5cff581",
+   "metadata": {},
+   "source": [
+    "## Entrenar el modelo\n",
+    "\n",
+    "- `n_clusters`: el K seleccionado.\n",
+    "- `random_state=42`: reproducibilidad.\n",
+    "- `n_init=20`: repite el algoritmo con 20 inicios distintos y conserva el de menor WCSS."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "64e29a66",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:26.031265Z",
+     "iopub.status.busy": "2026-11-04T21:27:26.030803Z",
+     "iopub.status.idle": "2026-11-04T21:27:26.112432Z",
+     "shell.execute_reply": "2026-11-04T21:27:26.111099Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# Entrenar el modelo K-Means\n",
+    "kmeans = KMeans(n_clusters=K_OPTIMO, random_state=RANDOM_STATE, n_init=N_INIT)\n",
+    "etiquetas = kmeans.fit_predict(X_scaled)\n",
+    "\n",
+    "# K-Means numera los clusters al azar: se renumeran de menor a mayor IPS para que el orden tenga significado\n",
+    "orden_ips = df.groupby(etiquetas)[\"ips\"].mean().sort_values().index\n",
+    "renumerar = {anterior: nuevo for nuevo, anterior in enumerate(orden_ips, start=1)}\n",
+    "df[\"Cluster\"] = pd.Series(etiquetas, index=df.index).map(renumerar)\n",
+    "\n",
+    "print(f\"K = {K_OPTIMO} | WCSS: {kmeans.inertia_:,.2f} | iteraciones: {kmeans.n_iter_}\")\n",
+    "display(df.groupby(\"Cluster\").agg(Municipios=(\"ips\",\"size\"), Viviendas=(\"n_viviendas\",\"sum\")).assign(\n",
+    "    pct_municipios=lambda t: (100*t[\"Municipios\"]/t[\"Municipios\"].sum()).round(1),\n",
+    "    pct_viviendas=lambda t: (100*t[\"Viviendas\"]/t[\"Viviendas\"].sum()).round(1)))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "33ee1c12",
+   "metadata": {},
+   "source": [
+    "## Visualización de los clusters"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "717af608",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:26.116747Z",
+     "iopub.status.busy": "2026-11-04T21:27:26.116384Z",
+     "iopub.status.idle": "2026-11-04T21:27:26.684655Z",
+     "shell.execute_reply": "2026-11-04T21:27:26.683651Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# dos pares de variables: se usa color y forma para identificar cada grupo\n",
+    "fig, axes = plt.subplots(1, 2, figsize=(12, 5.2))\n",
+    "for ax, (x_col, y_col) in zip(axes, [(\"pct_sin_saneamiento\", \"pct_sin_agua\"), (\"pct_sin_internet\", \"pct_sin_electricidad\")]):\n",
+    "    for c in sorted(df[\"Cluster\"].unique()):\n",
+    "        t = df[df[\"Cluster\"] == c]\n",
+    "        ax.scatter(t[x_col], t[y_col], s=30, alpha=0.8, color=COLORES[c], marker=MARCAS[c],\n",
+    "                   edgecolor=\"white\", linewidth=0.4, label=f\"Grupo {c}\")\n",
+    "    ax.set(xlabel=f\"% de viviendas {nombres[x_col].lower()}\", ylabel=f\"% de viviendas {nombres[y_col].lower()}\")\n",
+    "    ax.spines[[\"top\", \"right\"]].set_visible(False)\n",
+    "axes[0].legend(title=\"Cluster\", frameon=False, loc=\"upper left\")\n",
+    "fig.suptitle(\"Municipios por grupo\")\n",
+    "fig.text(0.01, 0.01, FUENTE + \" Cada punto es un municipio.\", fontsize=8)\n",
+    "fig.tight_layout(rect=(0, 0.04, 1, 1))\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "f1b13e32",
+   "metadata": {},
+   "source": [
+    "**Lectura:** el gráfico de la izquierda muestra lo más útil. Los grupos 3 y 4 se solapan en saneamiento, pero el grupo 4 queda por encima en falta de agua. A la derecha sucede algo parecido con la electricidad. Las fronteras entre grupos son contiguas, sin espacios vacíos."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "cd300d56",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:26.688004Z",
+     "iopub.status.busy": "2026-11-04T21:27:26.687712Z",
+     "iopub.status.idle": "2026-11-04T21:27:27.137931Z",
+     "shell.execute_reply": "2026-11-04T21:27:27.136525Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# PCA solo para dibujar las cuatro dimensiones en dos; K-Means no lo usa\n",
+    "pca = PCA(n_components=2, random_state=RANDOM_STATE)\n",
+    "componentes = pca.fit_transform(X_scaled)\n",
+    "varianza = 100 * pca.explained_variance_ratio_\n",
+    "fig, ax = plt.subplots(figsize=(8, 5.5))\n",
+    "for c in sorted(df[\"Cluster\"].unique()):\n",
+    "    marca = (df[\"Cluster\"] == c).to_numpy()\n",
+    "    ax.scatter(componentes[marca, 0], componentes[marca, 1], s=30, alpha=0.8, color=COLORES[c], marker=MARCAS[c],\n",
+    "               edgecolor=\"white\", linewidth=0.4, label=f\"Grupo {c}\")\n",
+    "ax.set(title=\"Los grupos sobre los dos primeros componentes\",\n",
+    "       xlabel=f\"Componente 1 ({varianza[0]:.1f} % de la varianza)\", ylabel=f\"Componente 2 ({varianza[1]:.1f} % de la varianza)\")\n",
+    "ax.legend(title=\"Cluster\", frameon=False)\n",
+    "ax.spines[[\"top\", \"right\"]].set_visible(False)\n",
+    "fig.text(0.01, 0.01, FUENTE, fontsize=8)\n",
+    "fig.tight_layout(rect=(0, 0.04, 1, 1))\n",
+    "plt.show()\n",
+    "print(f\"Varianza de los dos componentes: {varianza[0]:.1f} % y {varianza[1]:.1f} %\")\n",
+    "display(pd.DataFrame(pca.components_.T, index=features, columns=[\"Componente 1\", \"Componente 2\"]).round(3))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "d8acdda8",
+   "metadata": {},
+   "source": [
+    "**Lectura:** el primer componente concentra **76,5 % de la varianza** y sus cuatro pesos son casi iguales (0,47 a 0,53): mide la carencia general. Los grupos 1, 2 y 3 son tramos sucesivos de ese eje. El segundo componente (13,0 %) separa la falta de agua y electricidad (positivo) de la de saneamiento e internet (negativo), y es donde el grupo 4 se aparta. **Los datos se parecen más a un gradiente continuo que a grupos separados**: K-Means lo divide en tramos útiles para describir, pero esas fronteras no son naturales."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "f2c02d2a",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:27.142774Z",
+     "iopub.status.busy": "2026-11-04T21:27:27.142241Z",
+     "iopub.status.idle": "2026-11-04T21:27:27.639984Z",
+     "shell.execute_reply": "2026-11-04T21:27:27.638652Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# el mismo grupo pesa distinto si se cuentan municipios o viviendas\n",
+    "conteo = df.groupby(\"Cluster\").agg(Municipios=(\"ips\",\"size\"), Viviendas=(\"n_viviendas\",\"sum\"))\n",
+    "porcentajes = 100 * conteo / conteo.sum()\n",
+    "fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), sharey=True)\n",
+    "for ax, columna in zip(axes, conteo.columns):\n",
+    "    barras = ax.barh([f\"Grupo {c}\" for c in conteo.index], porcentajes[columna], color=[COLORES[c] for c in conteo.index], height=0.65)\n",
+    "    ax.bar_label(barras, labels=[f\"{p:.1f} %  ({v:,})\" for p, v in zip(porcentajes[columna], conteo[columna])], padding=4, fontsize=9)\n",
+    "    ax.set(title=f\"% de {columna.lower()}\", xlabel=\"Porcentaje del total\", xlim=(0, 100))\n",
+    "    ax.spines[[\"top\", \"right\"]].set_visible(False)\n",
+    "    ax.grid(False)\n",
+    "axes[0].invert_yaxis()\n",
+    "fig.text(0.01, 0.01, FUENTE, fontsize=8)\n",
+    "fig.tight_layout(rect=(0, 0.05, 1, 1))\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "804df60b",
+   "metadata": {},
+   "source": [
+    "**Lectura:** los dos conteos cuentan historias muy distintas. El grupo 1 reúne un cuarto de los municipios y casi tres cuartos de las viviendas clasificables, mientras que el grupo 4 tiene 15,5 % de los municipios y solo 4,8 % de las viviendas."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "4a10ce1a",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:27.643989Z",
+     "iopub.status.busy": "2026-11-04T21:27:27.643037Z",
+     "iopub.status.idle": "2026-11-04T21:27:28.672322Z",
+     "shell.execute_reply": "2026-11-04T21:27:28.671057Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# distribución de cada tasa de carencia por grupo\n",
+    "largo = df.reset_index().melt(id_vars=\"Cluster\", value_vars=features, var_name=\"Variable\", value_name=\"Porcentaje\")\n",
+    "largo[\"Variable\"] = largo[\"Variable\"].map(nombres)\n",
+    "fig, axes = plt.subplots(1, 4, figsize=(14, 4), sharey=True)\n",
+    "for ax, nombre in zip(axes, nombres.values()):\n",
+    "    sns.boxplot(data=largo[largo[\"Variable\"] == nombre], x=\"Cluster\", y=\"Porcentaje\", hue=\"Cluster\",\n",
+    "                palette=COLORES, saturation=1, legend=False, linewidth=1, ax=ax)\n",
+    "    ax.set(title=nombre, xlabel=\"Grupo\", ylabel=\"\")\n",
+    "    ax.spines[[\"top\", \"right\"]].set_visible(False)\n",
+    "    ax.grid(False, axis=\"x\")\n",
+    "axes[0].set_ylabel(\"% de viviendas del municipio\")\n",
+    "fig.text(0.01, 0.01, FUENTE, fontsize=8)\n",
+    "fig.tight_layout(rect=(0, 0.06, 1, 1))\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "93e10e7f",
+   "metadata": {},
+   "source": [
+    "**Lectura:** en saneamiento e internet, las cajas de los grupos 3 y 4 casi coinciden. En agua y electricidad, el grupo 4 se separa hacia arriba. Esa es la diferencia que el IPS por sí solo no deja ver."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "e3698ac4",
+   "metadata": {},
+   "source": [
+    "## Perfilado de clusters\n",
+    "\n",
+    "El perfilado describe cada grupo para darle un nombre útil. El mapa muestra el valor promedio y, con color, cuánto se aleja del promedio de los municipios. El IPS se muestra como referencia, pero **no valida los grupos**, porque se calcula con las mismas carencias que los forman. Las características de la vivienda sí son información que el modelo no vio."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "40305281",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:28.675726Z",
+     "iopub.status.busy": "2026-11-04T21:27:28.675306Z",
+     "iopub.status.idle": "2026-11-04T21:27:28.695479Z",
+     "shell.execute_reply": "2026-11-04T21:27:28.694288Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# perfil promedio de cada cluster: variables de agrupamiento y variables de contexto\n",
+    "cluster_profile = df.groupby(\"Cluster\")[features + [\"ips\"] + contexto + [\"cobertura\"]].mean().round(1)\n",
+    "cluster_profile.T"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "000f30c6",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:28.698454Z",
+     "iopub.status.busy": "2026-11-04T21:27:28.698163Z",
+     "iopub.status.idle": "2026-11-04T21:27:29.530636Z",
+     "shell.execute_reply": "2026-11-04T21:27:29.529358Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# z = distancia al promedio de los municipios, en desviaciones estándar; el rótulo muestra el % real\n",
+    "columnas_mapa = features + [\"ips\"] + contexto\n",
+    "perfil_z = (df.groupby(\"Cluster\")[columnas_mapa].mean() - df[columnas_mapa].mean()) / df[columnas_mapa].std()\n",
+    "fig, ax = plt.subplots(figsize=(11, 4.2))\n",
+    "sns.heatmap(perfil_z, annot=df.groupby(\"Cluster\")[columnas_mapa].mean().round(0), fmt=\".0f\", cmap=\"vlag\", center=0, vmin=-2, vmax=2,\n",
+    "            linewidths=0.5, cbar_kws={\"label\":\"Distancia al promedio (z)\"}, ax=ax)\n",
+    "ax.set(title=\"Perfil de los grupos (rótulos: % promedio de los municipios)\", ylabel=\"Grupo\", xlabel=\"\")\n",
+    "ax.tick_params(axis=\"x\", rotation=40)\n",
+    "plt.setp(ax.get_xticklabels(), ha=\"right\")\n",
+    "fig.text(0.01, 0.01, FUENTE, fontsize=8)\n",
+    "fig.tight_layout(rect=(0, 0.04, 1, 1))\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "2be6d015",
+   "metadata": {},
+   "source": [
+    "**Lectura:** las características de la vivienda, que el modelo no usó, cambian de forma coherente entre los grupos: el piso de tierra pasa de 16 % a 65 % y el área rural, de 32 % a 97 %. Eso da respaldo externo a la partición, aunque no prueba que una cosa cause la otra. Solo el techo de paja separa con claridad los grupos 3 y 4 (16 % y 29 %); en las demás características, ambos grupos son más parecidos."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "7e806827",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:29.534646Z",
+     "iopub.status.busy": "2026-11-04T21:27:29.534055Z",
+     "iopub.status.idle": "2026-11-04T21:27:30.125392Z",
+     "shell.execute_reply": "2026-11-04T21:27:30.124070Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# composición territorial: el departamento no se usó para formar los grupos\n",
+    "composicion = pd.crosstab(df[\"departamento\"], df[\"Cluster\"])\n",
+    "porcentaje_dep = 100 * composicion.div(composicion.sum(axis=1), axis=0)\n",
+    "orden_dep = porcentaje_dep[K_OPTIMO].sort_values(ascending=False).index\n",
+    "fig, ax = plt.subplots(figsize=(7.5, 5))\n",
+    "sns.heatmap(porcentaje_dep.loc[orden_dep], annot=composicion.loc[orden_dep], fmt=\"d\", cmap=\"Blues\", vmin=0, vmax=100,\n",
+    "            linewidths=0.5, cbar_kws={\"label\":\"% de municipios del departamento\"}, ax=ax)\n",
+    "ax.set(title=\"Municipios de cada departamento por grupo (rótulos: conteo)\", xlabel=\"Grupo\", ylabel=\"\")\n",
+    "fig.text(0.01, 0.01, FUENTE, fontsize=8)\n",
+    "fig.tight_layout(rect=(0, 0.04, 1, 1))\n",
+    "plt.show()\n",
+    "display(composicion.loc[orden_dep])"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "c58d925d",
+   "metadata": {},
+   "source": [
+    "**Lectura:** el departamento no se usó y aun así hay patrones: 50 de los 87 municipios de La Paz están en el grupo 3, 10 de los 15 de Pando en el grupo 4, y Santa Cruz (55 de 56) y Tarija (11 de 11) quedan casi por completo en los grupos 1 y 2. Pando coincide con la advertencia de la regresión lineal, donde el modelo también falló. Ningún departamento pertenece por entero a un grupo, por lo que la revisión debe hacerse por municipio."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "0860a5a4",
+   "metadata": {},
+   "source": [
+    "## Etiquetas de los clusters\n",
+    "\n",
+    "Los nombres son una interpretación de los valores anteriores. Los porcentajes son promedios de los municipios de cada grupo.\n",
+    "\n",
+    "| Grupo | Nombre | Descripción |\n",
+    "|---|---|---|\n",
+    "| 1 | **Menor carencia** | Más urbano (32 % rural). Sin agua 5 %, sin electricidad 6 %. Aun así, 36 % sin saneamiento y 22 % sin internet. |\n",
+    "| 2 | **Carencia intermedia** | Principalmente saneamiento (62 %) e internet (35 %); agua y electricidad cerca de 15 %. |\n",
+    "| 3 | **Saneamiento e internet críticos** | Rural (92 %). Sin saneamiento 81 %, sin internet 51 %; agua (22 %) y electricidad (27 %) en niveles moderados. |\n",
+    "| 4 | **Carencia múltiple, con falta de agua y electricidad** | Rural (97 %). Mismo nivel que el grupo 3 en saneamiento e internet, pero con el doble de falta de agua (46 %) y más falta de electricidad (42 %). |\n",
+    "\n",
+    "## ¿Cuántas viviendas hay detrás de cada tasa?"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "841d96d0",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:30.130236Z",
+     "iopub.status.busy": "2026-11-04T21:27:30.129293Z",
+     "iopub.status.idle": "2026-11-04T21:27:30.162298Z",
+     "shell.execute_reply": "2026-11-04T21:27:30.160996Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# la tasa más alta no implica la mayor cantidad de viviendas afectadas\n",
+    "afectadas = df.assign(precarias=df[\"ips\"] / 100 * df[\"n_viviendas\"]).groupby(\"Cluster\").agg(\n",
+    "    Viviendas=(\"n_viviendas\", \"sum\"), precarias=(\"precarias\", \"sum\")).rename(columns={\"precarias\":\"Viviendas precarias\"})\n",
+    "afectadas[\"% con dos o más carencias\"] = 100 * afectadas[\"Viviendas precarias\"] / afectadas[\"Viviendas\"]\n",
+    "afectadas[\"% del total nacional\"] = 100 * afectadas[\"Viviendas precarias\"] / afectadas[\"Viviendas precarias\"].sum()\n",
+    "assert round(100 * afectadas[\"Viviendas precarias\"].sum() / afectadas[\"Viviendas\"].sum(), 2) == round(ips_nacional, 2)\n",
+    "afectadas.round(1)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "68e8ef43",
+   "metadata": {},
+   "source": [
+    "**Lectura:** el grupo 4 tiene la mayor proporción de viviendas con dos o más carencias (69,5 %), pero solo 17,1 % del total de esas viviendas (88.481). El **grupo 3** concentra la mayor cantidad (173.896; 33,7 %). El grupo 1 tiene la proporción más baja (6,5 %), pero aun así reúne 119.751 viviendas (23,2 %), por su tamaño. Una acción dirigida solo a la tasa más alta dejaría fuera a más de 80 % de las viviendas afectadas. Las dos miradas responden a preguntas distintas: **dónde es más grave** y **dónde hay más viviendas**.\n",
+    "\n",
+    "El 6,5 % del grupo 1 pondera por viviendas; el 15 % del mapa anterior promedia municipios, y por eso difieren."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "ea6d9eb1",
+   "metadata": {},
+   "source": [
+    "## Cruce con población y hogares\n",
+    "\n",
+    "**Recomendación del docente:** cruzar los grupos con más variables, en especial **personas** y **personas por vivienda**. Hasta aquí todo se contó en viviendas; una vivienda con 7 personas pesa igual que una con 1. Esta sección cuenta personas y describe cómo viven los hogares de cada grupo.\n",
+    "\n",
+    "**Importante:** el modelo **no cambia**. Estas variables no forman los grupos (se mantienen las cuatro tasas de carencia); solo se cruzan con ellos, igual que el piso o el techo. Si se metieran al modelo, los grupos dejarían de responder a *qué servicio falta*.\n",
+    "\n",
+    "| Variable | Definición (por municipio) | Fuente |\n",
+    "|---|---|---|\n",
+    "| `n_personas` | Personas en las viviendas clasificables | `tot_pers` |\n",
+    "| `personas_precarias` | Personas en viviendas con dos o más carencias | `tot_pers` + carencias |\n",
+    "| `personas_por_vivienda` | Promedio de personas por vivienda | `tot_pers` |\n",
+    "| `personas_por_dormitorio` | Personas / dormitorios; si no hay cuarto solo para dormir, se usan los cuartos que ocupan | `tot_pers`, `v14_dormit`, `v13_habitac` |\n",
+    "| `pct_hacinamiento` | % de viviendas con más de 3 personas por dormitorio (definición operativa del proyecto) | idem |\n",
+    "| `pct_lena` | % que cocina con leña, guano, bosta o taquia | `v10_combus` = 3, 4 |\n",
+    "| `pct_sin_cocina` | % sin un cuarto solo para cocinar | `v12_cocina` = 2 |\n",
+    "| `pct_sin_refri`, `pct_sin_computadora`, `pct_sin_celular` | % sin ese bien | `v18f_refri`, `v19c_compu`, `v19d_celular` = 2 |\n",
+    "| `pct_emigracion` | % de hogares con algún miembro que hoy vive en otro país | `v20a_emi` = 1 |\n",
+    "| `pct_hogar_extendido` | % de hogares extendidos o compuestos | `tip_hog` = 5, 6 |\n",
+    "\n",
+    "Las respuestas \"sin especificar\" (código 9) quedan fuera del cálculo. `v14_dormit` no tiene dato en parte de las viviendas, así que las variables de dormitorio se calculan solo con las que sí lo tienen."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "id": "fe912638",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "# las tasas cuentan viviendas; aquí se cuentan las personas que viven en ellas\n",
+    "import matplotlib.ticker as mticker\n",
+    "\n",
+    "personas_grupo = df.groupby(\"Cluster\").agg(Viviendas=(\"n_viviendas\", \"sum\"), Personas=(\"n_personas\", \"sum\"),\n",
+    "                                           Personas_precarias=(\"personas_precarias\", \"sum\"))\n",
+    "personas_grupo[\"Personas por vivienda\"] = personas_grupo[\"Personas\"] / personas_grupo[\"Viviendas\"]\n",
+    "personas_grupo[\"% de personas en viviendas precarias\"] = 100 * personas_grupo[\"Personas_precarias\"] / personas_grupo[\"Personas\"]\n",
+    "personas_grupo[\"% del total nacional (personas)\"] = 100 * personas_grupo[\"Personas_precarias\"] / personas_grupo[\"Personas_precarias\"].sum()\n",
+    "personas_grupo[\"% del total nacional (viviendas)\"] = afectadas[\"% del total nacional\"]\n",
+    "display(personas_grupo.rename(columns={\"Personas_precarias\":\"Personas en viviendas precarias\"}).round(1))\n",
+    "\n",
+    "fig, axes = plt.subplots(1, 2, figsize=(12, 4.2), sharey=True)\n",
+    "for ax, columna, titulo in zip(axes, [\"Personas\", \"Personas_precarias\"],\n",
+    "                               [\"Personas en viviendas clasificables\", \"Personas en viviendas con dos o más carencias\"]):\n",
+    "    valores = personas_grupo[columna]\n",
+    "    barras = ax.barh([f\"Grupo {c}\" for c in valores.index], valores, color=[COLORES[c] for c in valores.index], height=0.65)\n",
+    "    ax.bar_label(barras, labels=[f\"{v:,.0f}  ({100 * v / valores.sum():.1f} %)\" for v in valores], padding=4, fontsize=9)\n",
+    "    ax.set(title=titulo, xlabel=\"Personas\", xlim=(0, valores.max() * 1.55))\n",
+    "    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f\"{v / 1e6:.1f} M\" if v >= 1e6 else f\"{v / 1e3:.0f} mil\"))\n",
+    "    ax.spines[[\"top\", \"right\"]].set_visible(False)\n",
+    "    ax.grid(False)\n",
+    "axes[0].invert_yaxis()\n",
+    "fig.text(0.01, 0.01, FUENTE, fontsize=8)\n",
+    "fig.tight_layout(rect=(0, 0.05, 1, 1))\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "7d6b593a",
+   "metadata": {},
+   "source": [
+    "**Cómo leerlo:** cada barra es un grupo y el rótulo dice cuántas personas tiene y qué parte del total nacional es. La tabla compara el reparto de **viviendas** precarias (columna de la sección anterior) con el de **personas** precarias.\n",
+    "\n",
+    "**Qué mirar:** si un grupo tiene más personas por vivienda, su parte en personas sube respecto a su parte en viviendas. Es decir: la prioridad cambia según se cuenten casas o gente. El resumen automático al final de la sección dice qué grupo concentra más personas afectadas."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "id": "76581d38",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "# tamaño del hogar, hacinamiento y otras condiciones del hogar (promedio de los municipios de cada grupo)\n",
+    "nombres_hogar = {\"personas_por_vivienda\":\"Personas por vivienda\", \"personas_por_dormitorio\":\"Personas por dormitorio\",\n",
+    "                 \"pct_hacinamiento\":\"% con hacinamiento\", \"pct_lena\":\"% cocina con leña o bosta\",\n",
+    "                 \"pct_sin_cocina\":\"% sin cuarto para cocinar\", \"pct_sin_refri\":\"% sin refrigerador\",\n",
+    "                 \"pct_sin_computadora\":\"% sin computadora\", \"pct_sin_celular\":\"% sin celular\",\n",
+    "                 \"pct_emigracion\":\"% con algún emigrante\", \"pct_hogar_extendido\":\"% hogar extendido o compuesto\"}\n",
+    "columnas_hogar = list(nombres_hogar)\n",
+    "perfil_hogar = df.groupby(\"Cluster\")[columnas_hogar].mean()\n",
+    "display(perfil_hogar.round(1).rename(columns=nombres_hogar).T)\n",
+    "\n",
+    "fig, axes = plt.subplots(1, 3, figsize=(14, 4.2))\n",
+    "for ax, columna in zip(axes, [\"personas_por_vivienda\", \"personas_por_dormitorio\", \"pct_hacinamiento\"]):\n",
+    "    sns.boxplot(data=df, x=\"Cluster\", y=columna, hue=\"Cluster\", palette=COLORES, saturation=1, legend=False, linewidth=1, ax=ax)\n",
+    "    ax.set(title=nombres_hogar[columna], xlabel=\"Grupo\", ylabel=\"\")\n",
+    "    ax.spines[[\"top\", \"right\"]].set_visible(False)\n",
+    "    ax.grid(False, axis=\"x\")\n",
+    "axes[1].axhline(LIMITE_HACINAMIENTO, color=REFERENCIA, linestyle=\"--\", linewidth=1.3)\n",
+    "axes[1].annotate(f\"Límite de hacinamiento ({LIMITE_HACINAMIENTO})\", (0.02, LIMITE_HACINAMIENTO), xycoords=(\"axes fraction\", \"data\"),\n",
+    "                 xytext=(0, 4), textcoords=\"offset points\", color=REFERENCIA, fontsize=8)\n",
+    "axes[2].set_ylabel(\"% de viviendas del municipio\")\n",
+    "fig.text(0.01, 0.01, FUENTE + \" Cada caja resume los municipios del grupo.\", fontsize=8)\n",
+    "fig.tight_layout(rect=(0, 0.06, 1, 1))\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "0e4b37ae",
+   "metadata": {},
+   "source": [
+    "**Cómo leerlo:** cada caja resume los municipios de un grupo (la raya es la mediana). En el panel del centro, la línea naranja marca el límite de 3 personas por dormitorio: cuanto más se acerca una caja a esa línea, más hogares apretados tiene el grupo.\n",
+    "\n",
+    "**Qué mirar:** si las cajas suben del grupo 1 al 4, la falta de servicios viene acompañada de hogares más llenos y con menos espacio. Si los grupos 3 y 4 vuelven a parecerse aquí, se confirma que lo que los separa es el agua y la electricidad, no el tamaño del hogar."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "id": "d1835cfb",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "# perfil ampliado: color = distancia al promedio de los municipios (z); rótulo = valor promedio real\n",
+    "z_hogar = (perfil_hogar - df[columnas_hogar].mean()) / df[columnas_hogar].std()\n",
+    "fig, ax = plt.subplots(figsize=(11, 4))\n",
+    "sns.heatmap(z_hogar.rename(columns=nombres_hogar), annot=perfil_hogar.rename(columns=nombres_hogar), fmt=\".1f\",\n",
+    "            cmap=\"vlag\", center=0, vmin=-2, vmax=2, linewidths=0.5, cbar_kws={\"label\":\"Distancia al promedio (z)\"}, ax=ax)\n",
+    "ax.set(title=\"Perfil de los grupos en personas y hogar (rojo: por encima del promedio)\", ylabel=\"Grupo\", xlabel=\"\")\n",
+    "ax.tick_params(axis=\"x\", rotation=40)\n",
+    "plt.setp(ax.get_xticklabels(), ha=\"right\")\n",
+    "fig.text(0.01, 0.01, FUENTE, fontsize=8)\n",
+    "fig.tight_layout(rect=(0, 0.04, 1, 1))\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "1dc07398",
+   "metadata": {},
+   "source": [
+    "**Cómo leerlo:** igual que el mapa de perfiles anterior. Cada fila es un grupo; el número es el promedio real y el color dice si está por encima (rojo) o por debajo (azul) del promedio de los municipios. Ojo: aquí rojo no siempre es \"peor\"; por ejemplo, la emigración alta no es una carencia.\n",
+    "\n",
+    "**Qué mirar:** qué variables nuevas separan a los grupos 3 y 4. Si la leña o la falta de refrigerador son mucho más altas en el grupo 4, eso es coherente con su falta de electricidad: sin luz no hay refrigerador y se cocina con leña."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "id": "a6c01f78",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "# cruce de tres variables: hacinamiento, IPS y tamaño del municipio en personas\n",
+    "from matplotlib.lines import Line2D\n",
+    "fig, ax = plt.subplots(figsize=(8.5, 6))\n",
+    "tamano_burbuja = 10 + 1500 * df[\"n_personas\"] / df[\"n_personas\"].max()  # área proporcional a las personas\n",
+    "for c in sorted(df[\"Cluster\"].unique()):\n",
+    "    t = df[df[\"Cluster\"] == c]\n",
+    "    ax.scatter(t[\"pct_hacinamiento\"], t[\"ips\"], s=tamano_burbuja.loc[t.index], color=COLORES[c], marker=MARCAS[c],\n",
+    "               alpha=0.6, edgecolor=\"white\", linewidth=0.5)\n",
+    "leyenda = [Line2D([], [], linestyle=\"\", marker=MARCAS[c], color=COLORES[c], markersize=8, label=f\"Grupo {c}\")\n",
+    "           for c in sorted(df[\"Cluster\"].unique())]\n",
+    "ax.legend(handles=leyenda, title=\"Cluster\", frameon=False, loc=\"lower right\")\n",
+    "ax.set(title=\"Hacinamiento, carencias y población por municipio\",\n",
+    "       xlabel=\"% de viviendas con hacinamiento\", ylabel=\"IPS (% de viviendas con dos o más carencias)\")\n",
+    "ax.spines[[\"top\", \"right\"]].set_visible(False)\n",
+    "fig.text(0.01, 0.01, FUENTE + \" Cada burbuja es un municipio; su tamaño es proporcional a sus personas.\", fontsize=8)\n",
+    "fig.tight_layout(rect=(0, 0.04, 1, 1))\n",
+    "plt.show()\n",
+    "print(f\"Correlación entre hacinamiento e IPS: {df['pct_hacinamiento'].corr(df['ips']):.2f}\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "4f48abfd",
+   "metadata": {},
+   "source": [
+    "**Cómo leerlo:** cada burbuja es un municipio. A la derecha, más hacinamiento; arriba, más carencias; el tamaño es la cantidad de personas y la forma/color, el grupo. Así se cruzan cuatro datos en un solo gráfico.\n",
+    "\n",
+    "**Qué mirar:** las burbujas grandes del grupo 1 (ciudades) quedan abajo; las pequeñas de los grupos 3 y 4 quedan arriba. Si hay burbujas **grandes y arriba**, son municipios con mucha gente y muchas carencias: los que más personas afectadas suman. La correlación impresa dice qué tan juntos se mueven el hacinamiento y el IPS."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "id": "b314730c",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "# ¿con qué carencia se relaciona cada variable nueva? (correlación entre municipios)\n",
+    "correlacion_hogar = df[columnas_hogar + features].corr().loc[columnas_hogar, features]\n",
+    "fig, ax = plt.subplots(figsize=(7.5, 5.5))\n",
+    "sns.heatmap(correlacion_hogar.rename(index=nombres_hogar, columns=nombres), annot=True, fmt=\".2f\", cmap=\"vlag\",\n",
+    "            vmin=-1, vmax=1, linewidths=0.5, cbar_kws={\"label\":\"Correlación\"}, ax=ax)\n",
+    "ax.set(title=\"Variables de hogar frente a cada carencia\", xlabel=\"\", ylabel=\"\")\n",
+    "fig.text(0.01, 0.01, FUENTE + \" Cada correlación se calcula sobre los 343 municipios.\", fontsize=8)\n",
+    "fig.tight_layout(rect=(0, 0.04, 1, 1))\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "75c23604",
+   "metadata": {},
+   "source": [
+    "**Cómo leerlo:** filas = variables nuevas, columnas = las cuatro carencias. Rojo fuerte: suben juntas; azul: cuando una sube, la otra baja; blanco: no hay relación.\n",
+    "\n",
+    "**Qué mirar:** compara cada fila entre columnas. Si la leña o la falta de refrigerador se relacionan más con *sin electricidad* que con *sin saneamiento*, apoyan el perfil del grupo 4. Recordar que es correlación entre municipios: no dice que una cosa cause la otra."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "id": "1487c480",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "# la composición por departamento, ahora contando personas en lugar de municipios\n",
+    "personas_dep = df.pivot_table(index=\"departamento\", columns=\"Cluster\", values=\"n_personas\", aggfunc=\"sum\", fill_value=0)\n",
+    "pct_personas_dep = 100 * personas_dep.div(personas_dep.sum(axis=1), axis=0)\n",
+    "orden_dep_p = pct_personas_dep[K_OPTIMO].sort_values(ascending=False).index\n",
+    "fig, ax = plt.subplots(figsize=(7.5, 5))\n",
+    "sns.heatmap(pct_personas_dep.loc[orden_dep_p], annot=True, fmt=\".0f\", cmap=\"Blues\", vmin=0, vmax=100,\n",
+    "            linewidths=0.5, cbar_kws={\"label\":\"% de personas del departamento\"}, ax=ax)\n",
+    "ax.set(title=\"Personas de cada departamento por grupo (rótulos: %)\", xlabel=\"Grupo\", ylabel=\"\")\n",
+    "fig.text(0.01, 0.01, FUENTE, fontsize=8)\n",
+    "fig.tight_layout(rect=(0, 0.04, 1, 1))\n",
+    "plt.show()\n",
+    "display((personas_dep.loc[orden_dep_p] / 1000).round(1).rename_axis(columns=\"Cluster (miles de personas)\"))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "063c0346",
+   "metadata": {},
+   "source": [
+    "**Cómo leerlo:** igual que el mapa de departamentos anterior, pero cada fila suma 100 % de las **personas** del departamento, no de sus municipios.\n",
+    "\n",
+    "**Qué mirar:** compara con el mapa por municipios. Un departamento puede tener muchos municipios en el grupo 3 o 4, pero la mayoría de su gente en el grupo 1 si su capital es grande (por ejemplo, La Paz con El Alto y la sede de gobierno). Contar personas cambia la foto territorial."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "id": "ec0b7eb6",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "# resumen automático con las cifras de esta sección\n",
+    "mas_personas = personas_grupo[\"Personas_precarias\"].idxmax()\n",
+    "cambio = personas_grupo[\"% del total nacional (personas)\"] - personas_grupo[\"% del total nacional (viviendas)\"]\n",
+    "pv = personas_grupo[\"Personas por vivienda\"]\n",
+    "hac = perfil_hogar[\"pct_hacinamiento\"]\n",
+    "mas_ligada = {nombres[f]: nombres_hogar[correlacion_hogar[f].abs().idxmax()] for f in features}\n",
+    "display(Markdown(\n",
+    "    f\"**Resumen del cruce.** Las viviendas clasificables reúnen **{personas_grupo['Personas'].sum():,.0f} personas**, \"\n",
+    "    f\"de las cuales **{personas_grupo['Personas_precarias'].sum():,.0f}** viven en viviendas con dos o más carencias. \"\n",
+    "    f\"El grupo **{mas_personas}** concentra la mayor cantidad: **{personas_grupo.loc[mas_personas, 'Personas_precarias']:,.0f} personas** \"\n",
+    "    f\"({personas_grupo.loc[mas_personas, '% del total nacional (personas)']:.1f} % del total). \"\n",
+    "    f\"Al contar personas en lugar de viviendas, el grupo que más gana peso es el **{cambio.idxmax()}** ({cambio.max():+.1f} puntos) \"\n",
+    "    f\"y el que más pierde es el **{cambio.idxmin()}** ({cambio.min():+.1f} puntos). \"\n",
+    "    f\"Las personas por vivienda van de **{pv.min():.2f}** (grupo {pv.idxmin()}) a **{pv.max():.2f}** (grupo {pv.idxmax()}), \"\n",
+    "    f\"y el hacinamiento promedio, de **{hac.min():.1f} %** (grupo {hac.idxmin()}) a **{hac.max():.1f} %** (grupo {hac.idxmax()}). \"\n",
+    "    \"Variable de hogar más relacionada con cada carencia: \"\n",
+    "    + \"; \".join(f\"{k}: {v}\" for k, v in mas_ligada.items()) + \".\"\n",
+    "))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "bd3c44a8",
+   "metadata": {},
+   "source": [
+    "**Municipios representativos.** El censo solo trae códigos, así que se identifican por código y departamento. Estos son ejemplos de cada perfil, no los municipios con mayores carencias."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "b22d38b8",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:30.165250Z",
+     "iopub.status.busy": "2026-11-04T21:27:30.164958Z",
+     "iopub.status.idle": "2026-11-04T21:27:30.197694Z",
+     "shell.execute_reply": "2026-11-04T21:27:30.196667Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# municipios más representativos: los tres más cercanos al centroide de su grupo\n",
+    "centroides = df.assign(**X_scaled_df).groupby(\"Cluster\")[features].mean()\n",
+    "distancia = np.linalg.norm(X_scaled_df.to_numpy() - centroides.loc[df[\"Cluster\"]].to_numpy(), axis=1)\n",
+    "representativos = (df.assign(distancia=distancia).sort_values(\"distancia\").groupby(\"Cluster\").head(3)\n",
+    "                   .sort_values([\"Cluster\", \"distancia\"])[[\"Cluster\", \"departamento\", \"n_viviendas\"] + features + [\"ips\"]])\n",
+    "representativos.round(1)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "0946ea55",
+   "metadata": {},
+   "source": [
+    "# ACTIVIDAD PARTICIPATIVA 2: Interpretación de clusters\n",
+    "\n",
+    "**1. ¿Qué grupo debería revisarse primero? ¿Por qué?**\n",
+    "\n",
+    "Depende del criterio. Por gravedad, el **grupo 4**: mayor IPS (70 %) y falta simultánea de los cuatro servicios, incluidos agua y electricidad. Por cantidad, el **grupo 3**, que tiene el mayor número de viviendas con dos o más carencias (173.896). El dato no decide por sí solo: es una decisión de política.\n",
+    "\n",
+    "**2. ¿Qué acción se propondría para cada grupo?**\n",
+    "\n",
+    "Estas son **propuestas de trabajo, no resultados del modelo**. Requieren verificar costos y condiciones locales.\n",
+    "\n",
+    "- **Grupo 1:** enfocar saneamiento en las zonas concretas que no lo tienen; la proporción es baja, pero son 119.751 viviendas con dos o más carencias.\n",
+    "- **Grupo 2:** priorizar saneamiento y conectividad, antes de que el municipio se acerque al perfil del grupo 3.\n",
+    "- **Grupo 3:** soluciones de saneamiento adecuadas a zonas rurales y ampliación de internet.\n",
+    "- **Grupo 4:** primero agua y electricidad, y revisar antes los datos de los municipios con cobertura baja.\n",
+    "\n",
+    "**3. Mirando la silueta y el codo, ¿cambiarías K?**\n",
+    "\n",
+    "Se mantendría K=4 para este fin, porque es el más estable entre los empatados y separa el perfil con falta de agua. Pero K=3 y K=5 tienen métricas casi iguales, y K=2 es la división más clara si solo interesa separar más y menos carencias. Para otro fin, otro K puede ser mejor.\n",
+    "\n",
+    "**4. ¿Qué otras variables añadirías?**\n",
+    "\n",
+    "Desde el censo de personas: educación y actividad económica, para describir mejor los grupos. También la distancia a centros urbanos y datos de inversión pública, que no están en este archivo. Se usarían primero para describir, no para formar los grupos, porque no miden qué servicio falta.\n",
+    "\n",
+    "**5. Si solo pudieras tener dos grupos, ¿cómo los combinarías?**\n",
+    "\n",
+    "La lógica sería unir 1 con 2 y 3 con 4, separando menor de mayor carencia. La tabla siguiente comprueba si K-Means con K=2 hace lo mismo."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "2e318114",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:30.201009Z",
+     "iopub.status.busy": "2026-11-04T21:27:30.200696Z",
+     "iopub.status.idle": "2026-11-04T21:27:30.262936Z",
+     "shell.execute_reply": "2026-11-04T21:27:30.261826Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# pregunta 5: ¿qué pasa al pedir solo dos grupos?\n",
+    "dos_grupos = KMeans(n_clusters=2, random_state=RANDOM_STATE, n_init=N_INIT).fit_predict(X_scaled)\n",
+    "# se numera 1 al grupo de menor IPS\n",
+    "if df.groupby(dos_grupos)[\"ips\"].mean().idxmin() == 1:\n",
+    "    dos_grupos = 1 - dos_grupos\n",
+    "dos_grupos = dos_grupos + 1\n",
+    "display(pd.crosstab(df[\"Cluster\"], dos_grupos, rownames=[\"Grupo con K=4\"], colnames=[\"Grupo con K=2\"]))\n",
+    "display(df.groupby(dos_grupos)[features + [\"ips\"]].mean().round(1).rename_axis(\"Grupo con K=2\"))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "a22481f5",
+   "metadata": {},
+   "source": [
+    "**Respuesta:** coincide casi por completo. Los grupos 1, 3 y 4 caen por entero en un solo lado; solo 14 municipios del grupo 2 pasan al lado de mayor carencia. Con K=2 se gana claridad, pero **se pierde justo lo que motiva este análisis**: la diferencia entre los grupos 3 y 4 en agua y electricidad."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "c551461c",
+   "metadata": {},
+   "source": [
+    "# PARTE 5: EVALUACIÓN Y MÉTRICAS\n",
+    "\n",
+    "En clustering no hay una respuesta correcta, así que se mide la calidad interna y la solidez de los grupos. Estas métricas **no indican si los grupos son útiles**: eso se juzga con la interpretación anterior.\n",
+    "\n",
+    "| Métrica | Qué mide | Mejor valor |\n",
+    "|---|---|---|\n",
+    "| **WCSS (inercia)** | Dispersión dentro de los grupos | Más bajo, a igual K |\n",
+    "| **Silueta** | Cohesión y separación | Más cercano a 1 |\n",
+    "| **Davies-Bouldin** | Parecido entre grupos vecinos | Más bajo |\n",
+    "| **ARI** | Coincidencia entre dos particiones | 1 = idénticas, 0 = como al azar |"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "31bc17ec",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:30.267667Z",
+     "iopub.status.busy": "2026-11-04T21:27:30.267204Z",
+     "iopub.status.idle": "2026-11-04T21:27:30.291430Z",
+     "shell.execute_reply": "2026-11-04T21:27:30.289814Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# Evaluación del modelo final\n",
+    "silhouette_final = silhouette_score(X_scaled, df[\"Cluster\"])\n",
+    "wcss_final = kmeans.inertia_\n",
+    "wcss_total = ((X_scaled - X_scaled.mean(axis=0))**2).sum()\n",
+    "print(f\"Número de clusters : {K_OPTIMO}\")\n",
+    "print(f\"WCSS (inercia)     : {wcss_final:,.2f}\")\n",
+    "print(f\"Varianza explicada : {100 * (1 - wcss_final / wcss_total):.1f} %\")\n",
+    "print(f\"Silueta            : {silhouette_final:.4f}\")\n",
+    "print(f\"Davies-Bouldin     : {davies_bouldin_score(X_scaled, df['Cluster']):.4f}\")\n",
+    "\n",
+    "if silhouette_final > 0.7:\n",
+    "    interpretacion = \"Excelente: clusters muy bien definidos\"\n",
+    "elif silhouette_final > 0.5:\n",
+    "    interpretacion = \"Bueno: clusters razonablemente bien definidos\"\n",
+    "elif silhouette_final > 0.25:\n",
+    "    interpretacion = \"Aceptable: hay superposición entre clusters\"\n",
+    "else:\n",
+    "    interpretacion = \"Débil: los clusters se solapan mucho\"\n",
+    "print(\"Interpretación     :\", interpretacion)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "b6ad1eb7",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:30.294872Z",
+     "iopub.status.busy": "2026-11-04T21:27:30.294588Z",
+     "iopub.status.idle": "2026-11-04T21:27:30.568036Z",
+     "shell.execute_reply": "2026-11-04T21:27:30.566454Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# silueta de cada municipio: un valor negativo indica que está más cerca de otro grupo\n",
+    "df[\"silueta\"] = silhouette_samples(X_scaled, df[\"Cluster\"])\n",
+    "display(df.groupby(\"Cluster\")[\"silueta\"].agg(Promedio=\"mean\", Mínimo=\"min\", Negativos=lambda s: int((s < 0).sum())).round(3))\n",
+    "\n",
+    "fig, ax = plt.subplots(figsize=(8, 5))\n",
+    "base = 0\n",
+    "for c in sorted(df[\"Cluster\"].unique()):\n",
+    "    valores = df.loc[df[\"Cluster\"] == c, \"silueta\"].sort_values().to_numpy()\n",
+    "    ax.fill_betweenx(np.arange(base, base + len(valores)), 0, valores, color=COLORES[c], linewidth=0)\n",
+    "    ax.text(-0.19, base + len(valores)/2, f\"Grupo {c}\", va=\"center\", ha=\"right\")\n",
+    "    base += len(valores) + 8\n",
+    "ax.axvline(silhouette_final, color=\"#555555\", linestyle=\"--\", linewidth=1.5)\n",
+    "ax.annotate(f\"Promedio: {silhouette_final:.3f}\", (silhouette_final, base), xytext=(6, 0), textcoords=\"offset points\", va=\"bottom\")\n",
+    "ax.set(title=\"Silueta por municipio\", xlabel=\"Silueta\", yticks=[], xlim=(-0.3, 0.75))\n",
+    "ax.spines[[\"top\", \"right\", \"left\"]].set_visible(False)\n",
+    "ax.grid(False)\n",
+    "ax.axvline(0, color=\"#555555\", linewidth=0.8)\n",
+    "fig.text(0.01, 0.01, FUENTE, fontsize=8)\n",
+    "fig.tight_layout(rect=(0, 0.04, 1, 1))\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "4b94c636",
+   "metadata": {},
+   "source": [
+    "**Interpretación:** la silueta de 0,313 indica grupos reconocibles pero con superposición, coherente con el gradiente de la PCA. **El grupo 4 es el menos compacto**: silueta de 0,130 y 14 de sus 53 municipios con valor negativo, es decir, más cerca de otro grupo. Comparte un perfil general, pero es heterogéneo y no conviene tratarlo como un bloque uniforme. El grupo 1 es el mejor definido (0,422)."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "5581242b",
+   "metadata": {},
+   "source": [
+    "## Solidez de los grupos"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "6fce1879",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:30.573331Z",
+     "iopub.status.busy": "2026-11-04T21:27:30.573031Z",
+     "iopub.status.idle": "2026-11-04T21:27:32.399302Z",
+     "shell.execute_reply": "2026-11-04T21:27:32.398085Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# ¿los grupos se mantienen si cambian los datos o el preprocesamiento?\n",
+    "def agrupar(datos):\n",
+    "    return KMeans(n_clusters=K_OPTIMO, random_state=RANDOM_STATE, n_init=N_INIT).fit_predict(datos)\n",
+    "\n",
+    "referencia = df[\"Cluster\"].to_numpy()\n",
+    "generador = np.random.default_rng(RANDOM_STATE)\n",
+    "\n",
+    "# 1. submuestras aleatorias del 80 % de los municipios\n",
+    "acuerdos_sub = []\n",
+    "for _ in range(50):\n",
+    "    idx = generador.choice(len(df), size=int(0.8 * len(df)), replace=False)\n",
+    "    acuerdos_sub.append(adjusted_rand_score(referencia[idx], agrupar(X_scaled[idx])))\n",
+    "\n",
+    "# 2. sin municipios de cobertura menor a 50 %\n",
+    "alta = (df[\"cobertura\"] >= 50).to_numpy()\n",
+    "\n",
+    "# 3. sin escalar las variables\n",
+    "sensibilidad = pd.DataFrame([\n",
+    "    {\"Prueba\":\"Submuestras del 80 % (50 repeticiones)\", \"Municipios\":int(0.8 * len(df)), \"ARI\":np.mean(acuerdos_sub), \"ARI mínimo\":np.min(acuerdos_sub)},\n",
+    "    {\"Prueba\":\"Solo cobertura de 50 % o más\", \"Municipios\":int(alta.sum()),\n",
+    "     \"ARI\":adjusted_rand_score(referencia[alta], agrupar(StandardScaler().fit_transform(X[alta]))), \"ARI mínimo\":np.nan},\n",
+    "    {\"Prueba\":\"Sin escalar las variables\", \"Municipios\":len(df), \"ARI\":adjusted_rand_score(referencia, agrupar(X.to_numpy())), \"ARI mínimo\":np.nan},\n",
+    "]).set_index(\"Prueba\")\n",
+    "display(sensibilidad.round(3))\n",
+    "\n",
+    "display(df.groupby(\"Cluster\").agg(Cobertura_media=(\"cobertura\",\"mean\"),\n",
+    "        Cobertura_menor_50=(\"cobertura\", lambda s: int((s < 50).sum()))).round(1))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "aaf99294",
+   "metadata": {},
+   "source": [
+    "**Interpretación:** la partición es bastante sólida. Con submuestras del 80 %, el ARI promedio es 0,845, aunque en el peor caso baja a 0,664, y cambia poco al quitar los municipios de baja cobertura (0,891) o no escalar (0,841). La cobertura media es parecida entre grupos (59,3 % a 65,2 %), de modo que no parece ser la causa de la partición. Aun así, 74 municipios tienen cobertura menor a 50 %, y su grupo es menos seguro."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "1f457db2",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:32.402934Z",
+     "iopub.status.busy": "2026-11-04T21:27:32.402584Z",
+     "iopub.status.idle": "2026-11-04T21:27:32.544043Z",
+     "shell.execute_reply": "2026-11-04T21:27:32.543174Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "# ¿qué pasa si los grupos se forman con otras variables? Mismo K para comparar\n",
+    "def resumen_variables(nombre, columnas):\n",
+    "    datos = StandardScaler().fit_transform(df[columnas])\n",
+    "    etiquetas_alt = KMeans(n_clusters=K_OPTIMO, random_state=RANDOM_STATE, n_init=N_INIT).fit_predict(datos)\n",
+    "    return {\"Variables\":nombre, \"Cantidad\":len(columnas), \"Silueta\":silhouette_score(datos, etiquetas_alt),\n",
+    "            \"ARI con el modelo final\":adjusted_rand_score(df[\"Cluster\"], etiquetas_alt)}\n",
+    "\n",
+    "display(pd.DataFrame([resumen_variables(\"Tasas de carencia (modelo final)\", features),\n",
+    "                      resumen_variables(\"Solo contexto de la vivienda\", contexto),\n",
+    "                      resumen_variables(\"Carencias y contexto\", features + contexto)]).set_index(\"Variables\").round(3))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "7aa90072",
+   "metadata": {},
+   "source": [
+    "**Interpretación:** las tasas de carencia dan la mayor silueta (0,313 frente a 0,254 y 0,255), aunque es una comparación limitada, porque cada silueta se mide con variables distintas. Con solo las características de la vivienda, la partición coincide poco con la final (ARI de 0,305): están relacionadas, pero no son intercambiables. Por eso la elección de variables se justifica sobre todo por la pregunta del proyecto, qué servicio falta, y no solo por esta métrica."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "ab864325",
+   "metadata": {},
+   "source": [
+    "# CONCLUSIONES\n",
+    "\n",
+    "## Limitaciones\n",
+    "\n",
+    "- **Gradiente, no grupos naturales:** K-Means siempre devuelve K grupos. Los municipios cercanos a una frontera podrían pertenecer a cualquiera de los dos lados.\n",
+    "- **Peso igual por municipio:** se trata igual a un municipio con 117 viviendas clasificables y a uno con 379.706. Los pequeños tienen tasas más inestables.\n",
+    "- **Cobertura:** 27,28 % de las viviendas analíticas no tiene clase y la cobertura va de 21,14 % a 95,86 %. Quienes quedan fuera pueden diferir de quienes están incluidos, y eso afecta a las tasas.\n",
+    "- **Promedios municipales:** dentro de un municipio puede haber realidades muy distintas. Un grupo no describe a cada vivienda (falacia ecológica).\n",
+    "- **Personas y dormitorios:** `tot_pers` cuenta a quienes estaban en la vivienda el día del censo, y `v14_dormit` falta en parte de las viviendas, así que el hacinamiento se calcula solo con las que tienen dato.\n",
+    "- **Sin causalidad:** los perfiles describen un solo censo. Las características de contexto se asocian con los grupos, pero no los explican.\n",
+    "- **Decisiones de método:** el resultado depende de las variables, del escalado y de K. Las pruebas del Paso 6 reducen ese riesgo, pero no lo eliminan.\n",
+    "\n",
+    "## Resultado"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "b70c6b8b",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-11-04T21:27:32.546917Z",
+     "iopub.status.busy": "2026-11-04T21:27:32.546629Z",
+     "iopub.status.idle": "2026-11-04T21:27:32.560719Z",
+     "shell.execute_reply": "2026-11-04T21:27:32.559784Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "peso = 100 * df.groupby(\"Cluster\")[\"n_viviendas\"].sum() / df[\"n_viviendas\"].sum()\n",
+    "tamano = df.groupby(\"Cluster\").size()\n",
+    "display(Markdown(\n",
+    "    f\"Se agruparon **{len(df)} municipios**, que resumen **{int(df['n_viviendas'].sum()):,} viviendas clasificables**, según sus cuatro tasas de carencia. \"\n",
+    "    f\"El modelo K-Means con **K={K_OPTIMO}** explica **{100*(1-wcss_final/wcss_total):.1f} %** de la varianza, con una silueta de **{silhouette_final:.3f}**, \"\n",
+    "    f\"lo que indica grupos reconocibles pero con superposición. El grupo {K_OPTIMO} reúne **{tamano[K_OPTIMO]} municipios** \"\n",
+    "    f\"({100*tamano[K_OPTIMO]/len(df):.1f} %), pero solo **{peso[K_OPTIMO]:.1f} %** de las viviendas clasificables; el grupo 1 reúne \"\n",
+    "    f\"**{tamano[1]} municipios** y **{peso[1]:.1f} %** de esas viviendas. El grupo con mayor tasa no es el que concentra más viviendas \"\n",
+    "    f\"con dos o más carencias: el grupo {afectadas['Viviendas precarias'].idxmax()} tiene **{afectadas['Viviendas precarias'].max():,.0f}** de ellas \"\n",
+    "    f\"({afectadas['% del total nacional'].max():.1f} %), frente a **{afectadas.loc[K_OPTIMO, 'Viviendas precarias']:,.0f}** del grupo {K_OPTIMO}. La partición sirve para organizar una revisión territorial; \"\n",
+    "    \"no demuestra causas ni separa tipos de municipio claramente distintos.\"\n",
+    "))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "3472cbe4",
+   "metadata": {},
+   "source": [
+    "**Trabajo posterior:** repetir el agrupamiento con ponderación por número de viviendas, revisar los municipios con cobertura baja, añadir nombres oficiales de municipios y contrastar los grupos con métodos que no requieran fijar K, como el clustering jerárquico.\n",
+    "\n",
+    "## Fuente de los datos\n",
+    "\n",
+    "**Instituto Nacional de Estadística (INE) de Bolivia.** Microdatos oficiales del **Censo de Población y Vivienda 2024**, archivo `Vivienda_CPV-2024.csv`; categorías contrastadas con `data/Diccionario de variables CPV 2024.xlsx`. Las reglas de población y de carencia se reproducen de `entendimiento de datos.ipynb`. Las tasas municipales, las tablas, las figuras y los grupos son elaboración propia."
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3 (ipykernel)",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "name": "python"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
